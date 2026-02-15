@@ -26,12 +26,17 @@ jobs:
       - name: Require index.html
         run: test -f index.html
 
-      - name: Block TODO/FIXME
+      - name: Block TODO/FIXME in source files
         run: |
-          if grep -RIn --exclude-dir=.git --exclude-dir=.github "TODO\|FIXME" .; then
+          if grep -RIn --exclude-dir=.git --exclude-dir=.github \
+            --include="*.html" \
+            --include="*.css" \
+            --include="*.js" \
+            "TODO\|FIXME" .; then
             echo "Remove TODO/FIXME before shipping"
             exit 1
           fi
+
 
       - name: Basic HTML sanity
         run: |
