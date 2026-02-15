@@ -1,0 +1,140 @@
+name: Deploy Pages
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require index.html
+        run: test -f index.html
+
+      - name: Block TODO/FIXME
+        run: |
+          if grep -RIn --exclude-dir=.git --exclude-dir=.github "TODO\|FIXME" .; then
+            echo "Remove TODO/FIXME before shipping"
+            exit 1
+          fi
+
+      - name: Basic HTML sanity
+        run: |
+          python - <<'PY'
+          import pathlib, sys
+          files = list(pathlib.Path(".").rglob("*.html"))
+          if not files:
+            print("No .html files found")
+            sys.exit(1)
+          bad = []
+          for f in files:
+            try:
+              f.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+              bad.append(str(f))
+          if bad:
+            print("Non-UTF8 HTML files:")
+            for x in bad: print(" -", x)
+            sys.exit(1)
+          print("OK")
+          PY
+
+      - name: Check broken local href/src references
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys, urllib.parse
+
+          root = pathlib.Path(".").resolve()
+          html_files = list(root.rglob("*.html"))
+          if not html_files:
+            print("No HTML files to check")
+            sys.exit(1)
+
+          # ignore external links, anchors, mailto/tel, data blobs
+          SKIP_PREFIXES = ("http://", "https://", "//", "#", "mailto:", "tel:", "data:")
+
+          # quick-n-dirty attribute extractor
+          attr_re = re.compile(r'''(?:href|src)\s*=\s*["']([^"']+)["']''', re.IGNORECASE)
+
+          missing = []
+
+          for f in html_files:
+            try:
+              text = f.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+              continue
+
+            for raw in attr_re.findall(text):
+              if not raw or raw.startswith(SKIP_PREFIXES):
+                continue
+
+              # strip query string + fragment
+              parts = urllib.parse.urlsplit(raw)
+              path = parts.path
+
+              # ignore empty after split
+              if not path:
+                continue
+
+              # absolute path inside repo: /assets/x -> repo_root/assets/x
+              if path.startswith("/"):
+                target = (root / path.lstrip("/")).resolve()
+              else:
+                target = (f.parent / path).resolve()
+
+              # block path traversal outside repo
+              try:
+                target.relative_to(root)
+              except ValueError:
+                missing.append((str(f.relative_to(root)), raw, "points outside repo"))
+                continue
+
+              # Allow directories if they contain index.html
+              if target.is_dir():
+                if not (target / "index.html").exists():
+                  missing.append((str(f.relative_to(root)), raw, "dir missing index.html"))
+                continue
+
+              if not target.exists():
+                missing.append((str(f.relative_to(root)), raw, "missing file"))
+
+          if missing:
+            print("Broken local references found:")
+            for file, ref, reason in missing[:200]:
+              print(f" - {file}: {ref} ({reason})")
+            sys.exit(1)
+
+          print("OK")
+          PY
+
+  deploy:
+    name: deploy
+    needs: verify
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deployment
+        uses: actions/deploy-pages@v4
