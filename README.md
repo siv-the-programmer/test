@@ -1,4 +1,4 @@
-# GitHub Pages Deployment (Actions Only)
+# GitHub Pages Deployment (Actions Only) Fork this for your repo
 
 This repository deploys a static website using GitHub Actions.
 
