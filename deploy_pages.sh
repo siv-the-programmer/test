@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 
-# Simple GitHub Pages deploy script
-# - You work on:  patch1
-# - Pages uses:   main (root /)
-# - Script keeps main synced to patch1
-
 WORK_BRANCH="patch1"
 PAGES_BRANCH="main"
 PAGES_PATH="/"
@@ -15,9 +10,11 @@ echo "GitHub Pages Deployment Tool"
 echo "by Sivario"
 echo ""
 
-pause() { echo ""; }
+fail() {
+  echo "error: $1"
+  exit 1
+}
 
-# ---------- input ----------
 get_repo() {
   echo -n "repo name: "
   read -r REPO
@@ -35,30 +32,26 @@ get_message() {
   fi
 }
 
-# ---------- checks ----------
 check_gh_login() {
-  gh auth status > /dev/null 2>&1
-  if [ $? -ne 0 ]; then
-    echo "gh not logged in. Run: gh auth login"
-    exit 1
+  if ! gh auth status > /dev/null 2>&1; then
+    fail "gh not logged in. Run: gh auth login"
   fi
 }
 
 ensure_git() {
   if [ ! -d ".git" ]; then
     echo "git init"
-    git init
+    if ! git init > /dev/null 2>&1; then
+      fail "git init failed"
+    fi
   fi
 }
 
 ensure_repo_exists() {
-  gh repo view "$USERNAME/$REPO" > /dev/null 2>&1
-  if [ $? -ne 0 ]; then
+  if ! gh repo view "$USERNAME/$REPO" > /dev/null 2>&1; then
     echo "repo not found -> creating $USERNAME/$REPO"
-    gh repo create "$USERNAME/$REPO" --public --source=. --remote=origin --push=false
-    if [ $? -ne 0 ]; then
-      echo "failed to create repo"
-      exit 1
+    if ! gh repo create "$USERNAME/$REPO" --public --source=. --remote=origin --push=false > /dev/null 2>&1; then
+      fail "failed to create repo"
     fi
   else
     echo "repo exists"
@@ -68,67 +61,60 @@ ensure_repo_exists() {
 ensure_remote() {
   REMOTE="https://github.com/$USERNAME/$REPO.git"
 
-  git remote add origin "$REMOTE" > /dev/null 2>&1
-  if [ $? -ne 0 ]; then
-    git remote set-url origin "$REMOTE"
+  if ! git remote add origin "$REMOTE" > /dev/null 2>&1; then
+    if ! git remote set-url origin "$REMOTE" > /dev/null 2>&1; then
+      fail "failed to set git remote"
+    fi
   fi
 
-  # try fetch (ok if it fails on brand new repo)
-  git fetch origin > /dev/null 2>&1
-}
-
-# ---------- branch helpers ----------
-ensure_branch() {
-  # usage: ensure_branch branch_name base_branch
-  BR="$1"
-  BASE="$2"
-
-  # local exists?
-  git show-ref --verify --quiet "refs/heads/$BR"
-  if [ $? -eq 0 ]; then
-    return
-  fi
-
-  # remote exists?
-  git show-ref --verify --quiet "refs/remotes/origin/$BR"
-  if [ $? -eq 0 ]; then
-    git checkout -B "$BR" "origin/$BR" > /dev/null 2>&1
-    return
-  fi
-
-  # create from base
-  git checkout -B "$BR" "$BASE" > /dev/null 2>&1
+  # Fetch if possible (new repos may not have anything yet; that's ok)
+  git fetch origin --prune > /dev/null 2>&1
 }
 
 ensure_first_commit() {
-  git rev-parse --verify HEAD > /dev/null 2>&1
-  if [ $? -ne 0 ]; then
+  if ! git rev-parse --verify HEAD > /dev/null 2>&1; then
     echo "first commit (repo was empty)"
-    git add .
+    git add . > /dev/null 2>&1
     git commit -m "initial commit" > /dev/null 2>&1
   fi
 }
 
-# ---------- pages ----------
-enable_pages_main_root() {
-  echo "setting GitHub Pages -> branch: $PAGES_BRANCH  path: $PAGES_PATH"
+ensure_branch() {
+  # ensure_branch BRANCH BASE_BRANCH
+  BR="$1"
+  BASE="$2"
 
-  # If pages already exists -> update
-  gh api "repos/$USERNAME/$REPO/pages" > /dev/null 2>&1
-  if [ $? -eq 0 ]; then
-    gh api -X PUT "repos/$USERNAME/$REPO/pages" \
-      -f "source[branch]=$PAGES_BRANCH" \
-      -f "source[path]=$PAGES_PATH" > /dev/null 2>&1
+  # local branch exists
+  if git show-ref --verify --quiet "refs/heads/$BR"; then
     return
   fi
 
-  # Else -> create
-  gh api -X POST "repos/$USERNAME/$REPO/pages" \
-    -f "source[branch]=$PAGES_BRANCH" \
-    -f "source[path]=$PAGES_PATH" > /dev/null 2>&1
+  # remote branch exists
+  if git show-ref --verify --quiet "refs/remotes/origin/$BR"; then
+    git checkout -B "$BR" "origin/$BR" > /dev/null 2>&1 || fail "failed to checkout $BR from origin"
+    return
+  fi
+
+  # create from base
+  git checkout -B "$BR" "$BASE" > /dev/null 2>&1 || fail "failed to create $BR from $BASE"
 }
 
-# ---------- actions ----------
+enable_pages_main_root() {
+  echo "setting GitHub Pages -> branch: $PAGES_BRANCH  path: $PAGES_PATH"
+
+  if gh api "repos/$USERNAME/$REPO/pages" > /dev/null 2>&1; then
+    # update existing
+    gh api -X PUT "repos/$USERNAME/$REPO/pages" \
+      -f "source[branch]=$PAGES_BRANCH" \
+      -f "source[path]=$PAGES_PATH" > /dev/null 2>&1 || fail "failed to update pages"
+  else
+    # create new
+    gh api -X POST "repos/$USERNAME/$REPO/pages" \
+      -f "source[branch]=$PAGES_BRANCH" \
+      -f "source[path]=$PAGES_PATH" > /dev/null 2>&1 || fail "failed to create pages"
+  fi
+}
+
 deploy() {
   echo ""
   echo "deploying..."
@@ -142,45 +128,40 @@ deploy() {
   ensure_repo_exists
   ensure_remote
 
-  # make sure main exists (and has at least 1 commit)
-  ensure_branch "$PAGES_BRANCH" "$PAGES_BRANCH"
-  git checkout "$PAGES_BRANCH" > /dev/null 2>&1
+  # make sure main exists + has at least one commit
+  if git show-ref --verify --quiet "refs/remotes/origin/$PAGES_BRANCH"; then
+    git checkout -B "$PAGES_BRANCH" "origin/$PAGES_BRANCH" > /dev/null 2>&1 || fail "failed to checkout main"
+  else
+    git checkout -B "$PAGES_BRANCH" > /dev/null 2>&1 || fail "failed to create main"
+  fi
   ensure_first_commit
 
   # make sure patch1 exists
   ensure_branch "$WORK_BRANCH" "$PAGES_BRANCH"
-  git checkout "$WORK_BRANCH" > /dev/null 2>&1
+  git checkout "$WORK_BRANCH" > /dev/null 2>&1 || fail "failed to checkout patch1"
 
-  # commit on patch1
-  git add .
-  git diff --cached --quiet
-  if [ $? -eq 0 ]; then
+  # commit on patch1 (only if something changed)
+  git add . > /dev/null 2>&1 || fail "git add failed"
+  if git diff --cached --quiet; then
     echo "no changes to commit"
   else
-    git commit -m "$MSG"
+    git commit -m "$MSG" || fail "git commit failed"
   fi
 
-  # push patch1
   echo "push -> $WORK_BRANCH"
-  git push -u origin "$WORK_BRANCH"
-  if [ $? -ne 0 ]; then
-    echo "push failed"
-    exit 1
-  fi
+  git push -u origin "$WORK_BRANCH" || fail "push patch1 failed"
 
-  # fast-forward main to patch1
   echo "sync $PAGES_BRANCH <- $WORK_BRANCH"
-  git checkout "$PAGES_BRANCH" > /dev/null 2>&1
-  git merge --ff-only "$WORK_BRANCH" > /dev/null 2>&1
-  git push -u origin "$PAGES_BRANCH" > /dev/null 2>&1
+  git checkout "$PAGES_BRANCH" > /dev/null 2>&1 || fail "checkout main failed"
+  git merge --ff-only "$WORK_BRANCH" > /dev/null 2>&1 || fail "fast-forward merge failed (main has diverged)"
+  git push -u origin "$PAGES_BRANCH" > /dev/null 2>&1 || fail "push main failed"
 
-  # enable pages
   enable_pages_main_root
 
   echo ""
   echo "done"
   echo "site: https://$USERNAME.github.io/$REPO/"
-  echo "work branch: $WORK_BRANCH"
+  echo "work branch : $WORK_BRANCH"
   echo "pages branch: $PAGES_BRANCH (root)"
   echo ""
 }
@@ -194,8 +175,7 @@ status() {
   echo "site: https://$USERNAME.github.io/$REPO/"
   echo ""
 
-  gh api "repos/$USERNAME/$REPO/pages" > /dev/null 2>&1
-  if [ $? -eq 0 ]; then
+  if gh api "repos/$USERNAME/$REPO/pages" > /dev/null 2>&1; then
     echo "pages: enabled"
     gh api "repos/$USERNAME/$REPO/pages" -q '.source | "source: \(.branch) \(.path)"' 2>/dev/null
   else
@@ -204,7 +184,6 @@ status() {
   echo ""
 }
 
-# ---------- menu ----------
 while true; do
   echo "1) deploy"
   echo "2) update"
@@ -213,17 +192,11 @@ while true; do
   echo -n "> "
   read -r CHOICE
 
-  if [ "$CHOICE" = "1" ]; then
-    deploy
-  elif [ "$CHOICE" = "2" ]; then
-    deploy
-  elif [ "$CHOICE" = "3" ]; then
-    status
-  elif [ "$CHOICE" = "4" ]; then
-    echo "bye"
-    exit 0
-  else
-    echo "invalid option"
-    pause
-  fi
+  case "$CHOICE" in
+    1) deploy ;;
+    2) deploy ;;
+    3) status ;;
+    4) echo "bye"; exit 0 ;;
+    *) echo "invalid option" ;;
+  esac
 done
